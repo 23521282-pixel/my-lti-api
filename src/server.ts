@@ -3,6 +3,20 @@ import express from "express";
 import { LTITool } from "@lti-tool/core";
 import { MemoryStorage } from "@lti-tool/memory";
 
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+
+  if (!value) {
+    throw new Error(`Missing environment variable: ${name}`);
+  }
+
+  return value;
+}
+
+// --------------------------------------------------
+// 1. Generate Tool key pair
+// --------------------------------------------------
+
 const keyPair = await crypto.subtle.generateKey(
   {
     name: "RSASSA-PKCS1-v1_5",
@@ -14,59 +28,83 @@ const keyPair = await crypto.subtle.generateKey(
   ["sign", "verify"]
 );
 
+// --------------------------------------------------
+// 2. LTI storage
+// --------------------------------------------------
+
 const storage = new MemoryStorage();
+
+// --------------------------------------------------
+// 3. Create LTI Tool
+// --------------------------------------------------
 
 const ltiTool = new LTITool({
   stateSecret: new TextEncoder().encode(
-    process.env.LTI_STATE_SECRET!
+    requiredEnv("LTI_STATE_SECRET")
   ),
   keyPair,
   storage,
 });
 
+// --------------------------------------------------
+// 4. Register Platform
+// --------------------------------------------------
+
 const clientId = await ltiTool.addClient({
-  name: "Cohota",
-  clientId: process.env.LTI_CLIENT_ID!,
-  iss: process.env.LTI_ISS!,
-  jwksUrl: process.env.LTI_JWKS_URL!,
-  authUrl: process.env.LTI_AUTH_URL!,
-  tokenUrl: process.env.LTI_TOKEN_URL!,
+  name: requiredEnv("LTI_PLATFORM_NAME"),
+  clientId: requiredEnv("LTI_CLIENT_ID"),
+  iss: requiredEnv("LTI_ISS"),
+  jwksUrl: requiredEnv("LTI_JWKS_URL"),
+  authUrl: requiredEnv("LTI_AUTH_URL"),
+  tokenUrl: requiredEnv("LTI_TOKEN_URL"),
 });
 
 await ltiTool.addDeployment(clientId, {
-  deploymentId: process.env.LTI_DEPLOYMENT_ID!,
-  name: "Development",
+  deploymentId: requiredEnv("LTI_DEPLOYMENT_ID"),
+  name: "Default",
 });
+
+// --------------------------------------------------
+// 5. Express application
+// --------------------------------------------------
 
 const app = express();
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-
-// ====================
-// Basic test
-// ====================
+// --------------------------------------------------
+// Health check
+// --------------------------------------------------
 
 app.get("/", (req, res) => {
-  res.send("My LTI Tool is running!");
+  res.json({
+    name: "New LTI Tool",
+    status: "running",
+  });
 });
 
-
-// ====================
+// --------------------------------------------------
 // LTI JWKS
-// ====================
+// --------------------------------------------------
 
 app.get("/lti/jwks", async (req, res) => {
-  const jwks = await ltiTool.getJWKS();
+  try {
+    const jwks = await ltiTool.getJWKS();
 
-  res.json(jwks);
+    res.json(jwks);
+  } catch (error) {
+    console.error("JWKS error:", error);
+
+    res.status(500).json({
+      error: "Failed to generate JWKS",
+    });
+  }
 });
 
-
-// ====================
-// LTI Login
-// ====================
+// --------------------------------------------------
+// LTI OIDC Login
+// --------------------------------------------------
 
 app.post("/lti/login", async (req, res) => {
   try {
@@ -82,14 +120,19 @@ app.post("/lti/login", async (req, res) => {
   }
 });
 
-
-// ====================
+// --------------------------------------------------
 // LTI Launch
-// ====================
+// --------------------------------------------------
 
 app.post("/lti/launch", async (req, res) => {
   try {
     const { id_token, state } = req.body;
+
+    if (!id_token || !state) {
+      return res.status(400).json({
+        error: "Missing id_token or state",
+      });
+    }
 
     const payload = await ltiTool.verifyLaunch(
       id_token,
@@ -115,24 +158,24 @@ app.post("/lti/launch", async (req, res) => {
   }
 });
 
-
-// ====================
-// Normal API
-// ====================
+// --------------------------------------------------
+// Example application API
+// --------------------------------------------------
 
 app.get("/api/hello", (req, res) => {
   res.json({
-    message: "Hello from my LTI Tool!",
+    message: "Hello from the new LTI Tool!",
   });
 });
 
-
-// ====================
+// --------------------------------------------------
 // Start server
-// ====================
+// --------------------------------------------------
 
 const port = Number(process.env.PORT) || 3000;
 
 app.listen(port, () => {
-  console.log(`LTI Tool running on http://localhost:${port}`);
+  console.log(
+    `LTI Tool running on port ${port}`
+  );
 });
