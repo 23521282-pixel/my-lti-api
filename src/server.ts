@@ -388,7 +388,15 @@ app.post("/lti/launch", async (req, res) => {
         error: "Missing id_token or state",
       });
     }
+console.log(
+  "===== RAW ID TOKEN ====="
+);
+console.log(id_token);
 
+console.log(
+  "===== RAW STATE ====="
+);
+console.log(state);
     const payload =
       await ltiTool.verifyLaunch(
         id_token,
