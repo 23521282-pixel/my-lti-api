@@ -39,6 +39,7 @@ const ltiTool = new LTITool({
   keyPair,
   storage,
 });
+
 const cohotaClientId = await ltiTool.addClient({
   name: "Cohota",
   clientId: "1060000000000004",
@@ -53,6 +54,7 @@ await ltiTool.addDeployment(cohotaClientId, {
     "5:5RKoVsSrxjSi1JYFiu8V6Es9Jnw7PB1ASSxWtyP3",
   name: "Cohota Deployment",
 });
+
 const app = express();
 
 app.use(express.urlencoded({ extended: true }));
@@ -79,6 +81,7 @@ app.get("/", (_req, res) => {
 app.get("/lti/register", async (req, res) => {
   console.log("===== LTI REGISTER CALLED =====");
   console.log("Query:", req.query);
+
   try {
     const openidConfigurationUrl =
       req.query.openid_configuration;
@@ -100,6 +103,7 @@ app.get("/lti/register", async (req, res) => {
         <p>Missing openid_configuration or registration_token.</p>
       `);
     }
+
     /**
      * Step 1:
      * Get Cohota's OpenID Configuration.
@@ -140,8 +144,6 @@ app.get("/lti/register", async (req, res) => {
     /**
      * Step 2:
      * Build our Tool registration.
-     *
-     * Replace this URL after deploying to Render.
      */
     const toolUrl =
       process.env.TOOL_URL ||
@@ -257,13 +259,15 @@ app.get("/lti/register", async (req, res) => {
       "Tool registered successfully:",
       registeredTool
     );
+
     console.log(
       "REGISTERED TOOL DETAILS:",
       JSON.stringify(registeredTool, null, 2)
     );
+
     /**
      * Step 4:
-     * Tell Canvas/Cohota to close the registration iframe.
+     * Tell Cohota to close the registration iframe.
      */
     res.type("html").send(`
       <!DOCTYPE html>
@@ -288,7 +292,6 @@ app.get("/lti/register", async (req, res) => {
         </body>
       </html>
     `);
-
   } catch (error) {
     console.error(
       "Dynamic registration error:",
@@ -321,32 +324,61 @@ app.get("/lti/jwks", async (_req, res) => {
 
 /**
  * LTI OIDC Login
+ *
+ * Cohota may initiate the login using either:
+ *
+ * GET  /lti/login?...query parameters...
+ * POST /lti/login  with form/body parameters
+ *
+ * Both methods are handled here.
  */
-app.post("/lti/login", async (req, res) => {
+async function handleLtiLogin(
+  params: Record<string, any>,
+  res: express.Response
+) {
   try {
-    console.log("LTI login params:", req.body);
+    console.log("===== LTI LOGIN =====");
+    console.log("LTI login params:", params);
 
     const launchUrl =
       `${process.env.TOOL_URL}/lti/launch`;
 
     const authUrl = await ltiTool.handleLogin({
-      ...req.body,
+      ...params,
       launchUrl,
     });
 
     console.log("LTI auth URL:", authUrl);
 
-    res.redirect(authUrl);
+    return res.redirect(authUrl);
   } catch (error) {
     console.error("LTI login error:", error);
 
-    res.status(400).json({
+    return res.status(400).json({
       error: "LTI login failed",
-      details: error instanceof Error
-        ? error.message
-        : String(error),
+      details:
+        error instanceof Error
+          ? error.message
+          : String(error),
     });
   }
+}
+
+/**
+ * GET LTI Login
+ *
+ * Example:
+ * GET /lti/login?iss=...&login_hint=...&client_id=...
+ */
+app.get("/lti/login", async (req, res) => {
+  await handleLtiLogin(req.query as Record<string, any>, res);
+});
+
+/**
+ * POST LTI Login
+ */
+app.post("/lti/login", async (req, res) => {
+  await handleLtiLogin(req.body, res);
 });
 
 /**
@@ -388,7 +420,6 @@ app.post("/lti/launch", async (req, res) => {
       message: "LTI launch successful",
       user: session.user,
     });
-
   } catch (error) {
     console.error(
       "LTI launch error:",
