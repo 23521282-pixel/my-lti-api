@@ -302,18 +302,27 @@ app.get("/lti/jwks", async (_req, res) => {
  */
 app.post("/lti/login", async (req, res) => {
   try {
-    const authUrl =
-      await ltiTool.handleLogin(req.body);
+    console.log("LTI login params:", req.body);
+
+    const launchUrl =
+      `${process.env.TOOL_URL}/lti/launch`;
+
+    const authUrl = await ltiTool.handleLogin({
+      ...req.body,
+      launchUrl,
+    });
+
+    console.log("LTI auth URL:", authUrl);
 
     res.redirect(authUrl);
   } catch (error) {
-    console.error(
-      "LTI login error:",
-      error
-    );
+    console.error("LTI login error:", error);
 
     res.status(400).json({
       error: "LTI login failed",
+      details: error instanceof Error
+        ? error.message
+        : String(error),
     });
   }
 });
