@@ -64,6 +64,8 @@ app.get("/", (_req, res) => {
  * &registration_token=...
  */
 app.get("/lti/register", async (req, res) => {
+  console.log("===== LTI REGISTER CALLED =====");
+  console.log("Query:", req.query);
   try {
     const openidConfigurationUrl =
       req.query.openid_configuration;
