@@ -39,7 +39,20 @@ const ltiTool = new LTITool({
   keyPair,
   storage,
 });
+const cohotaClientId = await ltiTool.addClient({
+  name: "Cohota",
+  clientId: "1060000000000004",
+  iss: "https://sso.cohota.com",
+  jwksUrl: "https://sso.cohota.com/api/lti/security/jwks",
+  authUrl: "https://sso.cohota.com/api/lti/authorize_redirect",
+  tokenUrl: "https://sso.cohota.com/login/oauth2/token",
+});
 
+await ltiTool.addDeployment(cohotaClientId, {
+  deploymentId:
+    "5:5RKoVsSrxjSi1JYFiu8V6Es9Jnw7PB1ASSxWtyP3",
+  name: "Cohota Deployment",
+});
 const app = express();
 
 app.use(express.urlencoded({ extended: true }));
