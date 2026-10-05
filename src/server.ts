@@ -60,9 +60,6 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-/**
- * Home
- */
 app.get("/", (_req, res) => {
   res.json({
     name: "New LTI Tool",
@@ -70,14 +67,6 @@ app.get("/", (_req, res) => {
   });
 });
 
-/**
- * Dynamic Registration
- *
- * Cohota redirects the administrator here with:
- *
- * ?openid_configuration=...
- * &registration_token=...
- */
 app.get("/lti/register", async (req, res) => {
   console.log("===== LTI REGISTER CALLED =====");
   console.log("Query:", req.query);
@@ -104,10 +93,6 @@ app.get("/lti/register", async (req, res) => {
       `);
     }
 
-    /**
-     * Step 1:
-     * Get Cohota's OpenID Configuration.
-     */
     const configurationResponse = await fetch(
       openidConfigurationUrl,
       {
@@ -141,47 +126,32 @@ app.get("/lti/register", async (req, res) => {
       platformConfiguration
     );
 
-    /**
-     * Step 2:
-     * Build our Tool registration.
-     */
     const toolUrl =
       process.env.TOOL_URL ||
       `${req.protocol}://${req.get("host")}`;
 
     const registration = {
       application_type: "web",
-
       client_name: "New LTI Tool",
-
       grant_types: [
         "client_credentials",
         "implicit",
       ],
-
       jwks_uri: `${toolUrl}/lti/jwks`,
-
       initiate_login_uri: `${toolUrl}/lti/login`,
-
       redirect_uris: [
         `${toolUrl}/lti/launch`,
       ],
-
       response_types: [
         "id_token",
       ],
-
       token_endpoint_auth_method: "private_key_jwt",
-
       scope: "",
-
       "https://purl.imsglobal.org/spec/lti-tool-configuration":
         {
           domain: new URL(toolUrl).hostname,
-
           target_link_uri:
             `${toolUrl}/lti/launch`,
-
           claims: [
             "sub",
             "iss",
@@ -191,21 +161,16 @@ app.get("/lti/register", async (req, res) => {
             "email",
             "locale",
           ],
-
           messages: [
             {
               type: "LtiResourceLinkRequest",
-
               label: "New LTI Tool",
-
               target_link_uri:
                 `${toolUrl}/lti/launch`,
             },
           ],
-
           "https://canvas.instructure.com/lti/privacy_level":
             "public",
-
           "https://canvas.instructure.com/lti/tool_id":
             "new-lti-tool",
         },
@@ -216,21 +181,15 @@ app.get("/lti/register", async (req, res) => {
       JSON.stringify(registration, null, 2)
     );
 
-    /**
-     * Step 3:
-     * Register the Tool with Cohota.
-     */
     const registrationResponse = await fetch(
       platformConfiguration.registration_endpoint,
       {
         method: "POST",
-
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
           Authorization: `Bearer ${registrationToken}`,
         },
-
         body: JSON.stringify(registration),
       }
     );
@@ -265,10 +224,6 @@ app.get("/lti/register", async (req, res) => {
       JSON.stringify(registeredTool, null, 2)
     );
 
-    /**
-     * Step 4:
-     * Tell Cohota to close the registration iframe.
-     */
     res.type("html").send(`
       <!DOCTYPE html>
       <html>
@@ -276,11 +231,9 @@ app.get("/lti/register", async (req, res) => {
           <meta charset="UTF-8" />
           <title>Registration Successful</title>
         </head>
-
         <body>
           <h1>Registration successful</h1>
           <p>The LTI Tool has been registered successfully.</p>
-
           <script>
             window.parent.postMessage(
               {
@@ -305,9 +258,6 @@ app.get("/lti/register", async (req, res) => {
   }
 });
 
-/**
- * Tool JWKS
- */
 app.get("/lti/jwks", async (_req, res) => {
   try {
     const jwks = await ltiTool.getJWKS();
@@ -322,37 +272,80 @@ app.get("/lti/jwks", async (_req, res) => {
   }
 });
 
-/**
- * LTI OIDC Login
- *
- * Cohota may initiate the login using either:
- *
- * GET  /lti/login?...query parameters...
- * POST /lti/login  with form/body parameters
- *
- * Both methods are handled here.
- */
+
+/* =========================================================
+   LTI OIDC LOGIN
+   ========================================================= */
+
+type LtiLoginParams = {
+  client_id: string;
+  iss: string;
+  login_hint: string;
+  target_link_uri: string;
+  lti_deployment_id: string;
+  lti_message_hint?: string;
+};
+
+function parseLtiLoginParams(
+  params: Record<string, unknown>
+): LtiLoginParams {
+  const client_id = params.client_id;
+  const iss = params.iss;
+  const login_hint = params.login_hint;
+  const target_link_uri = params.target_link_uri;
+  const lti_deployment_id = params.lti_deployment_id;
+  const lti_message_hint = params.lti_message_hint;
+
+  if (
+    typeof client_id !== "string" ||
+    typeof iss !== "string" ||
+    typeof login_hint !== "string" ||
+    typeof target_link_uri !== "string" ||
+    typeof lti_deployment_id !== "string"
+  ) {
+    throw new Error("Invalid LTI login parameters");
+  }
+
+  return {
+    client_id,
+    iss,
+    login_hint,
+    target_link_uri,
+    lti_deployment_id,
+    ...(typeof lti_message_hint === "string"
+      ? { lti_message_hint }
+      : {}),
+  };
+}
+
 async function handleLtiLogin(
-  params: Record<string, any>,
+  params: Record<string, unknown>,
   res: express.Response
 ) {
   try {
     console.log("===== LTI LOGIN =====");
     console.log("LTI login params:", params);
 
+    const loginParams =
+      parseLtiLoginParams(params);
+
     const launchUrl =
       `${process.env.TOOL_URL}/lti/launch`;
 
-    const authUrl = await ltiTool.handleLogin({
-      ...params,
-      launchUrl,
-    });
+    const authUrl =
+      await ltiTool.handleLogin({
+        ...loginParams,
+        launchUrl,
+      });
 
     console.log("LTI auth URL:", authUrl);
 
     return res.redirect(authUrl);
   } catch (error) {
-    console.error("LTI login error:", error);
+    console.error(
+      "LTI login error:",
+      error
+    );
 
     return res.status(400).json({
       error: "LTI login failed",
@@ -364,26 +357,25 @@ async function handleLtiLogin(
   }
 }
 
-/**
- * GET LTI Login
- *
- * Example:
- * GET /lti/login?iss=...&login_hint=...&client_id=...
- */
 app.get("/lti/login", async (req, res) => {
-  await handleLtiLogin(req.query as Record<string, any>, res);
+  await handleLtiLogin(
+    req.query as Record<string, unknown>,
+    res
+  );
 });
 
-/**
- * POST LTI Login
- */
 app.post("/lti/login", async (req, res) => {
-  await handleLtiLogin(req.body, res);
+  await handleLtiLogin(
+    req.body as Record<string, unknown>,
+    res
+  );
 });
 
-/**
- * LTI Launch
- */
+
+/* =========================================================
+   LTI LAUNCH
+   ========================================================= */
+
 app.post("/lti/launch", async (req, res) => {
   try {
     const {
@@ -432,9 +424,6 @@ app.post("/lti/launch", async (req, res) => {
   }
 });
 
-/**
- * Test API
- */
 app.get("/api/hello", (_req, res) => {
   res.json({
     message: "Hello from the new LTI Tool!",
