@@ -71,6 +71,11 @@ app.get("/lti/register", async (req, res) => {
     const registrationToken =
       req.query.registration_token;
 
+    console.log(
+      "OPENID CONFIGURATION URL:",
+      openidConfigurationUrl
+    );
+
     if (
       typeof openidConfigurationUrl !== "string" ||
       typeof registrationToken !== "string"
@@ -80,7 +85,6 @@ app.get("/lti/register", async (req, res) => {
         <p>Missing openid_configuration or registration_token.</p>
       `);
     }
-
     /**
      * Step 1:
      * Get Cohota's OpenID Configuration.
