@@ -13,10 +13,12 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-// --------------------------------------------------
-// 1. Generate Tool key pair
-// --------------------------------------------------
-
+/**
+ * Generate an RSA key pair for the LTI Tool.
+ *
+ * The private key is used by the Tool to sign requests.
+ * The public key is exposed through /lti/jwks.
+ */
 const keyPair = await crypto.subtle.generateKey(
   {
     name: "RSASSA-PKCS1-v1_5",
@@ -28,15 +30,7 @@ const keyPair = await crypto.subtle.generateKey(
   ["sign", "verify"]
 );
 
-// --------------------------------------------------
-// 2. LTI storage
-// --------------------------------------------------
-
 const storage = new MemoryStorage();
-
-// --------------------------------------------------
-// 3. Create LTI Tool
-// --------------------------------------------------
 
 const ltiTool = new LTITool({
   stateSecret: new TextEncoder().encode(
@@ -46,49 +40,250 @@ const ltiTool = new LTITool({
   storage,
 });
 
-// --------------------------------------------------
-// 4. Register Platform
-// --------------------------------------------------
-
-const clientId = await ltiTool.addClient({
-  name: requiredEnv("LTI_PLATFORM_NAME"),
-  clientId: requiredEnv("LTI_CLIENT_ID"),
-  iss: requiredEnv("LTI_ISS"),
-  jwksUrl: requiredEnv("LTI_JWKS_URL"),
-  authUrl: requiredEnv("LTI_AUTH_URL"),
-  tokenUrl: requiredEnv("LTI_TOKEN_URL"),
-});
-
-await ltiTool.addDeployment(clientId, {
-  deploymentId: requiredEnv("LTI_DEPLOYMENT_ID"),
-  name: "Default",
-});
-
-// --------------------------------------------------
-// 5. Express application
-// --------------------------------------------------
-
 const app = express();
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// --------------------------------------------------
-// Health check
-// --------------------------------------------------
-
-app.get("/", (req, res) => {
+/**
+ * Home
+ */
+app.get("/", (_req, res) => {
   res.json({
     name: "New LTI Tool",
     status: "running",
   });
 });
 
-// --------------------------------------------------
-// LTI JWKS
-// --------------------------------------------------
+/**
+ * Dynamic Registration
+ *
+ * Cohota redirects the administrator here with:
+ *
+ * ?openid_configuration=...
+ * &registration_token=...
+ */
+app.get("/lti/register", async (req, res) => {
+  try {
+    const openidConfigurationUrl =
+      req.query.openid_configuration;
 
-app.get("/lti/jwks", async (req, res) => {
+    const registrationToken =
+      req.query.registration_token;
+
+    if (
+      typeof openidConfigurationUrl !== "string" ||
+      typeof registrationToken !== "string"
+    ) {
+      return res.status(400).send(`
+        <h1>Invalid registration request</h1>
+        <p>Missing openid_configuration or registration_token.</p>
+      `);
+    }
+
+    /**
+     * Step 1:
+     * Get Cohota's OpenID Configuration.
+     */
+    const configurationResponse = await fetch(
+      openidConfigurationUrl,
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${registrationToken}`,
+        },
+      }
+    );
+
+    if (!configurationResponse.ok) {
+      const body = await configurationResponse.text();
+
+      console.error(
+        "OpenID configuration request failed:",
+        configurationResponse.status,
+        body
+      );
+
+      return res.status(502).send(`
+        <h1>Failed to retrieve Platform configuration</h1>
+        <p>Status: ${configurationResponse.status}</p>
+      `);
+    }
+
+    const platformConfiguration =
+      await configurationResponse.json();
+
+    console.log(
+      "Cohota OpenID configuration:",
+      platformConfiguration
+    );
+
+    /**
+     * Step 2:
+     * Build our Tool registration.
+     *
+     * Replace this URL after deploying to Render.
+     */
+    const toolUrl =
+      process.env.TOOL_URL ||
+      `${req.protocol}://${req.get("host")}`;
+
+    const registration = {
+      application_type: "web",
+
+      client_name: "New LTI Tool",
+
+      grant_types: [
+        "client_credentials",
+        "implicit",
+      ],
+
+      jwks_uri: `${toolUrl}/lti/jwks`,
+
+      initiate_login_uri: `${toolUrl}/lti/login`,
+
+      redirect_uris: [
+        `${toolUrl}/lti/launch`,
+      ],
+
+      response_types: [
+        "id_token",
+      ],
+
+      token_endpoint_auth_method: "private_key_jwt",
+
+      scope: "",
+
+      "https://purl.imsglobal.org/spec/lti-tool-configuration":
+        {
+          domain: new URL(toolUrl).hostname,
+
+          target_link_uri:
+            `${toolUrl}/lti/launch`,
+
+          claims: [
+            "sub",
+            "iss",
+            "name",
+            "given_name",
+            "family_name",
+            "email",
+            "locale",
+          ],
+
+          messages: [
+            {
+              type: "LtiResourceLinkRequest",
+
+              label: "New LTI Tool",
+
+              target_link_uri:
+                `${toolUrl}/lti/launch`,
+            },
+          ],
+
+          "https://canvas.instructure.com/lti/privacy_level":
+            "public",
+
+          "https://canvas.instructure.com/lti/tool_id":
+            "new-lti-tool",
+        },
+    };
+
+    console.log(
+      "Registration request:",
+      JSON.stringify(registration, null, 2)
+    );
+
+    /**
+     * Step 3:
+     * Register the Tool with Cohota.
+     */
+    const registrationResponse = await fetch(
+      platformConfiguration.registration_endpoint,
+      {
+        method: "POST",
+
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${registrationToken}`,
+        },
+
+        body: JSON.stringify(registration),
+      }
+    );
+
+    const registrationBody =
+      await registrationResponse.text();
+
+    if (!registrationResponse.ok) {
+      console.error(
+        "Tool registration failed:",
+        registrationResponse.status,
+        registrationBody
+      );
+
+      return res.status(502).send(`
+        <h1>Tool registration failed</h1>
+        <p>Status: ${registrationResponse.status}</p>
+        <pre>${registrationBody}</pre>
+      `);
+    }
+
+    const registeredTool =
+      JSON.parse(registrationBody);
+
+    console.log(
+      "Tool registered successfully:",
+      registeredTool
+    );
+
+    /**
+     * Step 4:
+     * Tell Canvas/Cohota to close the registration iframe.
+     */
+    res.type("html").send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <title>Registration Successful</title>
+        </head>
+
+        <body>
+          <h1>Registration successful</h1>
+          <p>The LTI Tool has been registered successfully.</p>
+
+          <script>
+            window.parent.postMessage(
+              {
+                subject: "org.imsglobal.lti.close"
+              },
+              "*"
+            );
+          </script>
+        </body>
+      </html>
+    `);
+
+  } catch (error) {
+    console.error(
+      "Dynamic registration error:",
+      error
+    );
+
+    res.status(500).send(`
+      <h1>Dynamic registration failed</h1>
+      <pre>${String(error)}</pre>
+    `);
+  }
+});
+
+/**
+ * Tool JWKS
+ */
+app.get("/lti/jwks", async (_req, res) => {
   try {
     const jwks = await ltiTool.getJWKS();
 
@@ -102,17 +297,20 @@ app.get("/lti/jwks", async (req, res) => {
   }
 });
 
-// --------------------------------------------------
-// LTI OIDC Login
-// --------------------------------------------------
-
+/**
+ * LTI OIDC Login
+ */
 app.post("/lti/login", async (req, res) => {
   try {
-    const authUrl = await ltiTool.handleLogin(req.body);
+    const authUrl =
+      await ltiTool.handleLogin(req.body);
 
     res.redirect(authUrl);
   } catch (error) {
-    console.error("LTI login error:", error);
+    console.error(
+      "LTI login error:",
+      error
+    );
 
     res.status(400).json({
       error: "LTI login failed",
@@ -120,13 +318,15 @@ app.post("/lti/login", async (req, res) => {
   }
 });
 
-// --------------------------------------------------
-// LTI Launch
-// --------------------------------------------------
-
+/**
+ * LTI Launch
+ */
 app.post("/lti/launch", async (req, res) => {
   try {
-    const { id_token, state } = req.body;
+    const {
+      id_token,
+      state,
+    } = req.body;
 
     if (!id_token || !state) {
       return res.status(400).json({
@@ -134,23 +334,35 @@ app.post("/lti/launch", async (req, res) => {
       });
     }
 
-    const payload = await ltiTool.verifyLaunch(
-      id_token,
-      state
+    const payload =
+      await ltiTool.verifyLaunch(
+        id_token,
+        state
+      );
+
+    console.log(
+      "LTI payload:",
+      payload
     );
 
-    console.log("LTI payload:", payload);
+    const session =
+      await ltiTool.createSession(payload);
 
-    const session = await ltiTool.createSession(payload);
-
-    console.log("LTI session:", session);
+    console.log(
+      "LTI session:",
+      session
+    );
 
     res.json({
       message: "LTI launch successful",
       user: session.user,
     });
+
   } catch (error) {
-    console.error("LTI launch error:", error);
+    console.error(
+      "LTI launch error:",
+      error
+    );
 
     res.status(401).json({
       error: "Invalid LTI launch",
@@ -158,21 +370,17 @@ app.post("/lti/launch", async (req, res) => {
   }
 });
 
-// --------------------------------------------------
-// Example application API
-// --------------------------------------------------
-
-app.get("/api/hello", (req, res) => {
+/**
+ * Test API
+ */
+app.get("/api/hello", (_req, res) => {
   res.json({
     message: "Hello from the new LTI Tool!",
   });
 });
 
-// --------------------------------------------------
-// Start server
-// --------------------------------------------------
-
-const port = Number(process.env.PORT) || 3000;
+const port =
+  Number(process.env.PORT) || 3000;
 
 app.listen(port, () => {
   console.log(
