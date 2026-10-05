@@ -238,7 +238,10 @@ app.get("/lti/register", async (req, res) => {
       "Tool registered successfully:",
       registeredTool
     );
-
+    console.log(
+      "REGISTERED TOOL DETAILS:",
+      JSON.stringify(registeredTool, null, 2)
+    );
     /**
      * Step 4:
      * Tell Canvas/Cohota to close the registration iframe.
