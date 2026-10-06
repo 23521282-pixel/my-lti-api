@@ -1,7 +1,16 @@
 import "dotenv/config";
 import express from "express";
-import { LTITool } from "@lti-tool/core";
+import { LTITool, type LTISession } from "@lti-tool/core";
 import { MemoryStorage } from "@lti-tool/memory";
+
+declare global {
+  namespace Express {
+    interface Request {
+      cookies?: Record<string, string>;
+      ltiSession?: LTISession;
+    }
+  }
+}
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -30,6 +39,15 @@ const keyPair = await crypto.subtle.generateKey(
   ["sign", "verify"]
 );
 
+/**
+ * In-memory storage for LTI clients, nonces, and sessions.
+ *
+ * NOTE: MemoryStorage keeps all sessions and nonces in Node process memory.
+ * It is suitable ONLY for development and testing. On serverless/container
+ * platforms (e.g. Render, AWS Lambda, Kubernetes pods), sessions disappear
+ * whenever the process restarts or scales, which will deauthenticate users.
+ * For production, use a persistent store (e.g. Redis, DynamoDB, PostgreSQL).
+ */
 const storage = new MemoryStorage();
 
 const ltiTool = new LTITool({
@@ -55,10 +73,132 @@ await ltiTool.addDeployment(cohotaClientId, {
   name: "Cohota Deployment",
 });
 
+/**
+ * Parses HTTP Cookie header into key-value pairs without external dependencies.
+ */
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!cookieHeader) return cookies;
+
+  const pairs = cookieHeader.split(";");
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf("=");
+    if (eqIdx !== -1) {
+      const key = pair.substring(0, eqIdx).trim();
+      const val = pair.substring(eqIdx + 1).trim();
+      try {
+        cookies[key] = decodeURIComponent(val);
+      } catch {
+        cookies[key] = val;
+      }
+    }
+  }
+
+  return cookies;
+}
+
+/**
+ * Computes secure cookie options for LTI session cookies.
+ *
+ * Requirements:
+ * - httpOnly: true (prevents client-side scripts from reading the token)
+ * - secure: true when running over HTTPS (required for SameSite=None)
+ * - sameSite: "none" in HTTPS/production (required for LMS iframe embedding),
+ *             falls back to "lax" for plain HTTP local development so browsers do not reject it.
+ * - partitioned: opt-in via COOKIE_PARTITIONED=true for CHIPS (Cookies Having Independent Partitioned State)
+ *                in modern browsers that block third-party cookies in iframes.
+ */
+function getSessionCookieOptions(req: express.Request): express.CookieOptions {
+  const isHttps =
+    req.secure ||
+    req.headers["x-forwarded-proto"] === "https" ||
+    process.env.TOOL_URL?.startsWith("https://") === true;
+
+  const secure =
+    process.env.COOKIE_SECURE !== undefined
+      ? process.env.COOKIE_SECURE === "true"
+      : isHttps;
+
+  // In browsers, SameSite=None strictly requires Secure=true.
+  // For local HTTP development without TLS, fall back to "lax".
+  const sameSite = secure ? "none" : "lax";
+
+  const options: express.CookieOptions = {
+    httpOnly: true,
+    secure,
+    sameSite,
+    path: "/",
+  };
+
+  if (process.env.COOKIE_PARTITIONED === "true") {
+    (options as Record<string, unknown>).partitioned = true;
+  }
+
+  return options;
+}
+
+/**
+ * Middleware requiring a valid active LTI session.
+ * Reads the opaque session ID from `req.cookies.lti_session` and retrieves
+ * the session from `@lti-tool/core` storage.
+ */
+async function requireLtiSession(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  try {
+    const sessionId = req.cookies?.lti_session;
+
+    if (!sessionId || typeof sessionId !== "string") {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Missing lti_session cookie",
+      });
+    }
+
+    const session = await ltiTool.getSession(sessionId);
+
+    if (!session) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Invalid or expired session",
+      });
+    }
+
+    // Check if the underlying LTI JWT id_token exp claim has passed
+    if (
+      typeof session.jwtPayload.exp === "number" &&
+      Date.now() >= session.jwtPayload.exp * 1000
+    ) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Session expired",
+      });
+    }
+
+    req.ltiSession = session;
+    next();
+  } catch (error) {
+    console.error("Session verification error:", error);
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Session authentication failed",
+    });
+  }
+}
+
 const app = express();
 
+app.set("trust proxy", 1);
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+// Express cookie parsing middleware (using built-in headers parsing)
+app.use((req, _res, next) => {
+  req.cookies = parseCookies(req.headers.cookie);
+  next();
+});
 
 app.get("/", (_req, res) => {
   res.json({
@@ -388,15 +528,7 @@ app.post("/lti/launch", async (req, res) => {
         error: "Missing id_token or state",
       });
     }
-console.log(
-  "===== RAW ID TOKEN ====="
-);
-console.log(id_token);
 
-console.log(
-  "===== RAW STATE ====="
-);
-console.log(state);
     const payload =
       await ltiTool.verifyLaunch(
         id_token,
@@ -412,14 +544,14 @@ console.log(state);
       await ltiTool.createSession(payload);
 
     console.log(
-      "LTI session:",
-      session
+      "LTI session created successfully for user:",
+      session.user.id
     );
 
-    res.json({
-      message: "LTI launch successful",
-      user: session.user,
-    });
+    const cookieOptions = getSessionCookieOptions(req);
+    res.cookie("lti_session", session.id, cookieOptions);
+
+    return res.redirect("/app");
   } catch (error) {
     console.error(
       "LTI launch error:",
@@ -430,6 +562,20 @@ console.log(state);
       error: "Invalid LTI launch",
     });
   }
+});
+
+app.get("/app", requireLtiSession, (req, res) => {
+  res.json({
+    message: "LTI Tool authenticated",
+    user: req.ltiSession?.user,
+  });
+});
+
+app.get("/api/me", requireLtiSession, (req, res) => {
+  res.json({
+    authenticated: true,
+    user: req.ltiSession?.user,
+  });
 });
 
 app.get("/api/hello", (_req, res) => {
