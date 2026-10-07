@@ -1,7 +1,9 @@
 import "dotenv/config";
 import express from "express";
+import path from "node:path";
 import { LTITool, type LTISession } from "@lti-tool/core";
 import { MemoryStorage } from "@lti-tool/memory";
+import { quizRouter } from "./routes/quiz.routes.js";
 
 declare global {
   namespace Express {
@@ -188,11 +190,14 @@ async function requireLtiSession(
   }
 }
 
+const publicDir = path.resolve(process.cwd(), "public");
+
 const app = express();
 
 app.set("trust proxy", 1);
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(express.static(publicDir, { index: false }));
 
 // Express cookie parsing middleware (using built-in headers parsing)
 app.use((req, _res, next) => {
@@ -200,10 +205,21 @@ app.use((req, _res, next) => {
   next();
 });
 
-app.get("/", (_req, res) => {
+app.get("/health", (_req, res) => {
   res.json({
-    name: "New LTI Tool",
+    status: "ok",
+  });
+});
+
+app.get("/", (req, res) => {
+  if (req.headers.accept?.includes("text/html")) {
+    return res.sendFile(path.join(publicDir, "index.html"));
+  }
+
+  res.json({
+    name: "LTI Quiz Tool",
     status: "running",
+    message: "This application is intended to be launched from Cohota LMS.",
   });
 });
 
@@ -565,6 +581,10 @@ app.post("/lti/launch", async (req, res) => {
 });
 
 app.get("/app", requireLtiSession, (req, res) => {
+  if (req.headers.accept?.includes("text/html")) {
+    return res.sendFile(path.join(publicDir, "app.html"));
+  }
+
   res.json({
     message: "LTI Tool authenticated",
     user: req.ltiSession?.user,
@@ -577,6 +597,9 @@ app.get("/api/me", requireLtiSession, (req, res) => {
     user: req.ltiSession?.user,
   });
 });
+
+// Protected Quiz API routes
+app.use("/api/quizzes", requireLtiSession, quizRouter);
 
 app.get("/api/hello", (_req, res) => {
   res.json({
