@@ -2,11 +2,16 @@ import type { AttemptStatus, QuestionType } from "../generated/prisma/enums.js";
 
 export type { AttemptStatus, QuestionType };
 
-/** A single selectable answer choice. `id` is what gets submitted and stored. */
-export interface QuestionOption {
+/**
+ * A single selectable answer choice. `id` is what gets submitted and stored.
+ *
+ * Declared as a type alias (not an interface) so it stays assignable to
+ * Prisma's `InputJsonValue` for the `options` JSON column without a cast.
+ */
+export type QuestionOption = {
   id: string;
   text: string;
-}
+};
 
 export interface QuestionBankDto {
   id: string;

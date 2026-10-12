@@ -40,7 +40,7 @@ interface AttemptQuestionRow {
   order: number;
   questionText: string;
   type: QuestionType;
-  options: unknown;
+  options: Prisma.JsonValue;
   correctAnswer: string;
   explanation: string | null;
   points: Prisma.Decimal;
@@ -267,7 +267,7 @@ export async function startAttempt(
         order: index,
         questionText: question.text,
         type: question.type,
-        options: question.options as unknown as Prisma.InputJsonValue,
+        options: parseOptions(question.options),
         correctAnswer: question.correctAnswer,
         explanation: question.explanation,
         points: question.points,

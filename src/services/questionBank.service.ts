@@ -5,7 +5,6 @@ import { decimalToNumber, parseOptions } from "../lib/serialize.js";
 import type {
   QuestionBankDto,
   QuestionDto,
-  QuestionOption,
   QuestionType,
 } from "../types/quiz.js";
 import type {
@@ -36,7 +35,7 @@ interface QuestionRow {
   questionBankId: string;
   text: string;
   type: QuestionType;
-  options: unknown;
+  options: Prisma.JsonValue;
   correctAnswer: string;
   explanation: string | null;
   points: Prisma.Decimal;
@@ -80,7 +79,7 @@ function toExistingContent(row: QuestionRow) {
   return {
     text: row.text,
     type: row.type,
-    options: parseOptions(row.options) as QuestionOption[],
+    options: parseOptions(row.options),
     correctAnswer: row.correctAnswer,
     explanation: row.explanation,
     points: decimalToNumber(row.points),
@@ -207,7 +206,7 @@ export async function createQuestion(
       questionBankId: bankId,
       text: content.text,
       type: content.type,
-      options: content.options as unknown as Prisma.InputJsonValue,
+      options: content.options,
       correctAnswer: content.correctAnswer,
       explanation: content.explanation,
       points: new Prisma.Decimal(content.points),
@@ -232,7 +231,7 @@ export async function updateQuestion(
     data: {
       text: content.text,
       type: content.type,
-      options: content.options as unknown as Prisma.InputJsonValue,
+      options: content.options,
       correctAnswer: content.correctAnswer,
       explanation: content.explanation,
       points: new Prisma.Decimal(content.points),

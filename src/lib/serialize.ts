@@ -1,5 +1,11 @@
 import type { Prisma } from "../generated/prisma/client.js";
 import type { QuestionOption } from "../types/quiz.js";
+import { z } from "zod";
+
+/** Permissive shape check for options read back out of the database. */
+const storedOptionsSchema = z.array(
+  z.object({ id: z.string(), text: z.string() })
+);
 
 /** Converts a Prisma Decimal column into a JSON-friendly number. */
 export function decimalToNumber(
@@ -14,23 +20,12 @@ export function decimalToNumber(
  * through validated schemas, so a malformed shape here means data corruption
  * rather than bad input; we fail loudly instead of returning junk.
  */
-export function parseOptions(raw: unknown): QuestionOption[] {
-  if (!Array.isArray(raw)) {
-    throw new Error("Stored question options are not an array.");
+export function parseOptions(raw: Prisma.JsonValue): QuestionOption[] {
+  const result = storedOptionsSchema.safeParse(raw);
+  if (!result.success) {
+    throw new Error("Stored question options are malformed.");
   }
-
-  return raw.map((entry, index) => {
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      typeof (entry as QuestionOption).id !== "string" ||
-      typeof (entry as QuestionOption).text !== "string"
-    ) {
-      throw new Error(`Stored question option at index ${index} is malformed.`);
-    }
-    const option = entry as QuestionOption;
-    return { id: option.id, text: option.text };
-  });
+  return result.data;
 }
 
 /** Rounds a percentage to two decimals for display and storage. */
