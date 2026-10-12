@@ -1,0 +1,137 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Supported question types. Add new variants here to extend the quiz model;
+/// `Question.options` holds the validated answer choices for the type.
+enum QuestionType {
+  SINGLE_CHOICE
+  TRUE_FALSE
+}
+
+/// Lifecycle of a quiz attempt. Answers and scores are only final once SUBMITTED.
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+}
+
+/// A reusable pool of questions that quizzes draw from.
+model QuestionBank {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  questions Question[]
+  quizzes   Quiz[]
+}
+
+/// A single question inside a bank.
+///
+/// `options` is a validated JSON array of `{ id, text }` pairs. `correctAnswer`
+/// stores the option `id` for SINGLE_CHOICE and "true"/"false" for TRUE_FALSE.
+model Question {
+  id             String       @id @default(cuid())
+  questionBankId String
+  text           String
+  type           QuestionType
+  options        Json
+  correctAnswer  String
+  explanation    String?
+  points         Decimal      @default(1) @db.Decimal(8, 2)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  bank             QuestionBank      @relation(fields: [questionBankId], references: [id], onDelete: Cascade)
+  attemptQuestions AttemptQuestion[]
+
+  @@index([questionBankId])
+}
+
+/// A quiz definition: which bank to draw from and how many questions to select.
+model Quiz {
+  id             String   @id @default(cuid())
+  title          String
+  description    String?
+  questionBankId String
+  questionCount  Int
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bank     QuestionBank  @relation(fields: [questionBankId], references: [id], onDelete: Restrict)
+  attempts QuizAttempt[]
+
+  @@index([questionBankId])
+}
+
+/// One run of a quiz by one authenticated user.
+///
+/// `userId` is the verified LTI subject (`sub`); `userIssuer` records the
+/// platform issuer so identities stay unique across platforms.
+model QuizAttempt {
+  id          String        @id @default(cuid())
+  quizId      String
+  userId      String
+  userIssuer  String?
+  status      AttemptStatus @default(IN_PROGRESS)
+  score       Decimal       @default(0) @db.Decimal(10, 2)
+  maxScore    Decimal       @default(0) @db.Decimal(10, 2)
+  startedAt   DateTime      @default(now())
+  submittedAt DateTime?
+
+  quiz      Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  questions AttemptQuestion[]
+
+  @@index([quizId, userId])
+  @@index([userId])
+}
+
+/// Immutable snapshot of a question as it was presented in a specific attempt.
+///
+/// Copying text/options/correctAnswer here means later edits to `Question` never
+/// change a historical result. `order` preserves the order shown to the user.
+model AttemptQuestion {
+  id            String       @id @default(cuid())
+  attemptId     String
+  questionId    String?
+  order         Int
+  questionText  String
+  type          QuestionType
+  options       Json
+  correctAnswer String
+  explanation   String?
+  points        Decimal      @db.Decimal(8, 2)
+
+  attempt  QuizAttempt    @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question Question?      @relation(fields: [questionId], references: [id], onDelete: SetNull)
+  answer   AttemptAnswer?
+
+  @@unique([attemptId, order])
+  @@unique([attemptId, questionId])
+  @@index([questionId])
+}
+
+/// The answer a user submitted for one AttemptQuestion, plus its graded result.
+model AttemptAnswer {
+  id                String    @id @default(cuid())
+  attemptQuestionId String    @unique
+  selectedAnswer    String?
+  isCorrect         Boolean?
+  pointsEarned      Decimal?  @db.Decimal(8, 2)
+  submittedAt       DateTime?
+
+  attemptQuestion AttemptQuestion @relation(fields: [attemptQuestionId], references: [id], onDelete: Cascade)
+}

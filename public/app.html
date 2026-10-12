@@ -15,13 +15,18 @@
 
     <div id="error-message" class="error-banner" style="display: none;"></div>
 
-    <!-- VIEW 1: Quiz List -->
+    <!-- VIEW 1: Quiz list -->
     <div id="quizzes-view">
       <h2 style="margin-bottom: 16px;">Available Quizzes</h2>
       <div id="quizzes-list" class="loading">Loading quizzes...</div>
+
+      <div id="attempts-wrap" style="display: none; margin-top: 32px;">
+        <h3 style="margin-bottom: 12px;">My previous attempts</h3>
+        <div id="attempts-list"></div>
+      </div>
     </div>
 
-    <!-- VIEW 2: Active Quiz -->
+    <!-- VIEW 2: Active attempt -->
     <div id="quiz-view" style="display: none;">
       <div class="card">
         <h2 id="quiz-title"></h2>
@@ -31,58 +36,94 @@
         <form id="quiz-form">
           <div id="questions-container"></div>
           <div style="margin-top: 24px;">
-            <button type="button" class="btn btn-secondary" onclick="showQuizList()">Back to Quizzes</button>
+            <button type="button" class="btn btn-secondary" id="back-to-list">Back to Quizzes</button>
             <button type="submit" class="btn" id="submit-btn">Submit Quiz</button>
           </div>
         </form>
       </div>
     </div>
 
-    <!-- VIEW 3: Result -->
+    <!-- VIEW 3: Result summary -->
     <div id="result-view" style="display: none;">
       <div class="card result-card">
         <div id="result-badge" class="result-badge"></div>
         <div id="result-score" class="score-display"></div>
         <div id="result-percentage" class="percentage-text"></div>
-        <button type="button" class="btn" onclick="showQuizList()">Back to Quizzes</button>
+        <div style="margin-top: 20px;">
+          <button type="button" class="btn" id="review-btn">Review answers</button>
+          <button type="button" class="btn btn-secondary" id="result-back">Back to Quizzes</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIEW 4: Post-submission review -->
+    <div id="review-view" style="display: none;">
+      <div class="card">
+        <h2 id="review-title">Review</h2>
+        <p id="review-summary" class="percentage-text"></p>
+        <div id="review-container"></div>
+        <div style="margin-top: 24px;">
+          <button type="button" class="btn btn-secondary" id="review-back">Back to Quizzes</button>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
-    let currentQuizId = null;
+    // The answer key never reaches the browser before submission: the
+    // active-attempt endpoints omit correctAnswer/explanation server-side.
+    const state = {
+      quiz: null,
+      attempt: null,
+    };
 
     async function init() {
       try {
-        // 1. Fetch current authenticated user
         const userRes = await fetch("/api/me");
         if (!userRes.ok) {
           showError("Not authenticated. Please launch this tool from Cohota LMS.");
           document.getElementById("user-info").innerText = "Not Authenticated";
           return;
         }
-        const userData = await userRes.json();
-        const userName = userData.user?.name || userData.user?.givenName || "Student";
-        document.getElementById("user-info").innerText = `Hello, ${userName}`;
 
-        // 2. Load quizzes
+        const userData = await userRes.json();
+        const userName =
+          userData.user?.name || userData.user?.givenName || "Student";
+        document.getElementById("user-info").innerText = "Hello, " + userName;
+
         await loadQuizzes();
       } catch (err) {
         showError("Failed to initialize session: " + err.message);
       }
     }
 
+    async function apiFetch(url, options) {
+      const response = await fetch(url, options);
+      const text = await response.text();
+      let body = null;
+      if (text) {
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = null;
+        }
+      }
+      if (!response.ok) {
+        const message =
+          (body && (body.message || body.error)) ||
+          "Request failed with status " + response.status;
+        throw new Error(message);
+      }
+      return body;
+    }
+
     async function loadQuizzes() {
       const listEl = document.getElementById("quizzes-list");
       listEl.innerHTML = "Loading quizzes...";
+      hideError();
 
       try {
-        const res = await fetch("/api/quizzes");
-        if (!res.ok) {
-          throw new Error("Unable to load quizzes (status: " + res.status + ")");
-        }
-
-        const quizzes = await res.json();
+        const quizzes = await apiFetch("/api/quizzes");
         if (!quizzes.length) {
           listEl.innerHTML = "<p>No quizzes available right now.</p>";
           return;
@@ -92,149 +133,306 @@
         quizzes.forEach((quiz) => {
           const card = document.createElement("div");
           card.className = "card";
-          card.innerHTML = `
-            <h2>${escapeHtml(quiz.title)}</h2>
-            <p>${escapeHtml(quiz.description)}</p>
-            <button class="btn" onclick="startQuiz('${escapeHtml(quiz.id)}')">Start</button>
-          `;
+
+          const title = document.createElement("h2");
+          title.innerText = quiz.title;
+
+          const description = document.createElement("p");
+          description.innerText = quiz.description || "";
+
+          const meta = document.createElement("p");
+          meta.innerText =
+            quiz.questionCount +
+            " question(s) from bank \"" +
+            quiz.questionBankName +
+            "\"";
+
+          const startButton = document.createElement("button");
+          startButton.className = "btn";
+          startButton.innerText = "Start";
+          startButton.addEventListener("click", () => startAttempt(quiz));
+
+          const attemptsButton = document.createElement("button");
+          attemptsButton.className = "btn btn-secondary";
+          attemptsButton.style.marginLeft = "8px";
+          attemptsButton.innerText = "My attempts";
+          attemptsButton.addEventListener("click", () => loadAttempts(quiz));
+
+          card.append(title, description, meta, startButton, attemptsButton);
           listEl.appendChild(card);
         });
       } catch (err) {
-        listEl.innerHTML = `<p style="color: var(--danger)">Error loading quizzes: ${escapeHtml(err.message)}</p>`;
+        listEl.innerHTML = "<p>Unable to load quizzes.</p>";
+        showError(err.message);
       }
     }
 
-    async function startQuiz(quizId) {
-      currentQuizId = quizId;
+    async function loadAttempts(quiz) {
+      const wrap = document.getElementById("attempts-wrap");
+      const listEl = document.getElementById("attempts-list");
       hideError();
+      wrap.style.display = "block";
+      listEl.innerHTML = "Loading attempts...";
 
       try {
-        const res = await fetch(`/api/quizzes/${quizId}`);
-        if (!res.ok) {
-          throw new Error("Failed to load quiz details.");
+        const attempts = await apiFetch(
+          "/api/quizzes/" + encodeURIComponent(quiz.id) + "/attempts/me"
+        );
+
+        if (!attempts.length) {
+          listEl.innerHTML =
+            "<p>No attempts yet for " + escapeHtml(quiz.title) + ".</p>";
+          return;
         }
 
-        const quiz = await res.json();
-        document.getElementById("quiz-title").innerText = quiz.title;
-        document.getElementById("quiz-description").innerText = quiz.description;
+        listEl.innerHTML = "";
+        attempts.forEach((attempt) => {
+          const row = document.createElement("div");
+          row.className = "card";
 
-        const questionsContainer = document.getElementById("questions-container");
-        questionsContainer.innerHTML = "";
+          const label = document.createElement("p");
+          label.innerText =
+            new Date(attempt.startedAt).toLocaleString() +
+            " \u2014 " +
+            (attempt.status === "SUBMITTED"
+              ? attempt.score + " / " + attempt.maxScore + " (" + attempt.percentage + "%)"
+              : "in progress");
 
-        quiz.questions.forEach((q, idx) => {
-          const qBlock = document.createElement("div");
-          qBlock.className = "question-block";
+          row.appendChild(label);
 
-          const qTitle = document.createElement("div");
-          qTitle.className = "question-text";
-          qTitle.innerText = `${idx + 1}. ${q.question}`;
-          qBlock.appendChild(qTitle);
+          if (attempt.status === "SUBMITTED") {
+            const reviewButton = document.createElement("button");
+            reviewButton.className = "btn btn-secondary";
+            reviewButton.innerText = "Review";
+            reviewButton.addEventListener("click", () =>
+              showReview(attempt.attemptId)
+            );
+            row.appendChild(reviewButton);
+          }
 
-          q.options.forEach((opt) => {
-            const label = document.createElement("label");
-            label.className = "option-label";
-
-            const radio = document.createElement("input");
-            radio.type = "radio";
-            radio.name = `question_${q.id}`;
-            // Extract choice indicator (e.g., "A" from "A. Option" or whole option)
-            const choiceMatch = opt.match(/^([A-Za-z0-9]+)[\.\:]/);
-            radio.value = choiceMatch ? choiceMatch[1] : opt;
-
-            const span = document.createElement("span");
-            span.innerText = opt;
-
-            label.appendChild(radio);
-            label.appendChild(span);
-            qBlock.appendChild(label);
-          });
-
-          questionsContainer.appendChild(qBlock);
+          listEl.appendChild(row);
         });
+      } catch (err) {
+        listEl.innerHTML = "";
+        showError(err.message);
+      }
+    }
+
+    async function startAttempt(quiz) {
+      hideError();
+      try {
+        // Starting an attempt draws the questions for this attempt only.
+        const attempt = await apiFetch(
+          "/api/quizzes/" + encodeURIComponent(quiz.id) + "/attempts",
+          { method: "POST" }
+        );
+
+        state.quiz = quiz;
+        state.attempt = attempt;
+
+        document.getElementById("quiz-title").innerText = attempt.quizTitle;
+        document.getElementById("quiz-description").innerText =
+          quiz.description || "";
+
+        renderQuestions(attempt);
 
         document.getElementById("quizzes-view").style.display = "none";
         document.getElementById("result-view").style.display = "none";
+        document.getElementById("review-view").style.display = "none";
         document.getElementById("quiz-view").style.display = "block";
       } catch (err) {
         showError(err.message);
       }
     }
 
-    document.getElementById("quiz-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      if (!currentQuizId) return;
+    function renderQuestions(attempt) {
+      const container = document.getElementById("questions-container");
+      container.innerHTML = "";
 
-      const submitBtn = document.getElementById("submit-btn");
-      submitBtn.disabled = true;
-      submitBtn.innerText = "Submitting...";
+      attempt.questions.forEach((question, index) => {
+        const block = document.createElement("div");
+        block.className = "question-block";
 
-      try {
-        const form = e.target;
-        const answers = [];
+        const title = document.createElement("div");
+        title.className = "question-text";
+        title.innerText =
+          index + 1 + ". " + question.questionText + " (" + question.maxPoints + " pt)";
+        block.appendChild(title);
 
-        // Collect answers
-        const questionBlocks = document.querySelectorAll(".question-block");
-        questionBlocks.forEach((block) => {
-          const checked = block.querySelector("input[type='radio']:checked");
-          if (checked) {
-            const questionId = checked.name.replace("question_", "");
-            answers.push({
-              questionId,
-              answer: checked.value
-            });
+        question.options.forEach((option) => {
+          const label = document.createElement("label");
+          label.className = "option-label";
+
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "q_" + question.attemptQuestionId;
+          radio.value = option.id;
+          if (question.selectedAnswer === option.id) {
+            radio.checked = true;
           }
+
+          const span = document.createElement("span");
+          span.innerText = option.text;
+
+          label.append(radio, span);
+          block.appendChild(label);
         });
 
-        const res = await fetch(`/api/quizzes/${currentQuizId}/submit`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ answers })
-        });
+        container.appendChild(block);
+      });
+    }
 
-        if (!res.ok) {
-          throw new Error("Quiz submission failed with status: " + res.status);
+    function collectAnswers() {
+      return state.attempt.questions.map((question) => {
+        const selected = document.querySelector(
+          "input[name='q_" + question.attemptQuestionId + "']:checked"
+        );
+        return {
+          attemptQuestionId: question.attemptQuestionId,
+          selectedAnswer: selected ? selected.value : null,
+        };
+      });
+    }
+
+    document
+      .getElementById("quiz-form")
+      .addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!state.attempt) return;
+
+        const submitButton = document.getElementById("submit-btn");
+        submitButton.disabled = true;
+        submitButton.innerText = "Submitting...";
+        hideError();
+
+        try {
+          const result = await apiFetch(
+            "/api/attempts/" + encodeURIComponent(state.attempt.attemptId) + "/submit",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ answers: collectAnswers() }),
+            }
+          );
+          showResult(result);
+        } catch (err) {
+          showError("Submission error: " + err.message);
+        } finally {
+          submitButton.disabled = false;
+          submitButton.innerText = "Submit Quiz";
         }
-
-        const result = await res.json();
-        showResult(result);
-      } catch (err) {
-        showError("Submission error: " + err.message);
-      } finally {
-        submitBtn.disabled = false;
-        submitBtn.innerText = "Submit Quiz";
-      }
-    });
+      });
 
     function showResult(result) {
       document.getElementById("quiz-view").style.display = "none";
       document.getElementById("quizzes-view").style.display = "none";
+      document.getElementById("review-view").style.display = "none";
 
       const badge = document.getElementById("result-badge");
-      if (result.passed) {
-        badge.className = "result-badge result-passed";
-        badge.innerText = "PASSED";
-      } else {
-        badge.className = "result-badge result-failed";
-        badge.innerText = "NOT PASSED";
-      }
+      const passed = result.percentage >= 50;
+      badge.className =
+        "result-badge " + (passed ? "result-passed" : "result-failed");
+      badge.innerText = passed ? "PASSED" : "NOT PASSED";
 
-      document.getElementById("result-score").innerText = `${result.score} / ${result.maxScore}`;
-      document.getElementById("result-percentage").innerText = `Score: ${result.percentage}%`;
+      document.getElementById("result-score").innerText =
+        result.score + " / " + result.maxScore;
+      document.getElementById("result-percentage").innerText =
+        "Score: " + result.percentage + "%";
+
+      document.getElementById("review-btn").onclick = () =>
+        showReview(result.attemptId);
 
       document.getElementById("result-view").style.display = "block";
     }
 
-    function showQuizList() {
+    async function showReview(attemptId) {
+      hideError();
+
+      try {
+        const review = await apiFetch(
+          "/api/attempts/" + encodeURIComponent(attemptId) + "/review"
+        );
+
+        document.getElementById("review-title").innerText =
+          review.quizTitle + " \u2014 review";
+        document.getElementById("review-summary").innerText =
+          "Submitted " +
+          new Date(review.submittedAt).toLocaleString() +
+          " \u00b7 " +
+          review.score +
+          " / " +
+          review.maxScore +
+          " (" +
+          review.percentage +
+          "%)";
+
+        const container = document.getElementById("review-container");
+        container.innerHTML = "";
+
+        review.questions.forEach((question, index) => {
+          const block = document.createElement("div");
+          block.className = "question-block";
+
+          const title = document.createElement("div");
+          title.className = "question-text";
+          title.innerText = index + 1 + ". " + question.questionText;
+          block.appendChild(title);
+
+          const outcome = document.createElement("p");
+          outcome.innerText =
+            (question.isCorrect ? "\u2714 Correct" : "\u2718 Incorrect") +
+            " \u2014 " +
+            question.pointsEarned +
+            " / " +
+            question.maxPoints +
+            " point(s)";
+          block.appendChild(outcome);
+
+          question.options.forEach((option) => {
+            const line = document.createElement("p");
+            const markers = [];
+            if (option.id === question.correctAnswer) markers.push("correct answer");
+            if (option.id === question.selectedAnswer) markers.push("your answer");
+            line.innerText =
+              option.id +
+              ". " +
+              option.text +
+              (markers.length ? " \u2014 " + markers.join(", ") : "");
+            block.appendChild(line);
+          });
+
+          if (question.explanation) {
+            const explanation = document.createElement("p");
+            explanation.style.color = "var(--text-muted)";
+            explanation.innerText = "Explanation: " + question.explanation;
+            block.appendChild(explanation);
+          }
+
+          container.appendChild(block);
+        });
+
+        document.getElementById("quizzes-view").style.display = "none";
+        document.getElementById("quiz-view").style.display = "none";
+        document.getElementById("result-view").style.display = "none";
+        document.getElementById("review-view").style.display = "block";
+      } catch (err) {
+        showError(err.message);
+      }
+    }
+
+    function backToList() {
       document.getElementById("quiz-view").style.display = "none";
       document.getElementById("result-view").style.display = "none";
+      document.getElementById("review-view").style.display = "none";
       document.getElementById("quizzes-view").style.display = "block";
+      state.attempt = null;
       hideError();
     }
 
-    function showError(msg) {
-      const errEl = document.getElementById("error-message");
-      errEl.innerText = msg;
-      errEl.style.display = "block";
+    function showError(message) {
+      const errorElement = document.getElementById("error-message");
+      errorElement.innerText = message;
+      errorElement.style.display = "block";
     }
 
     function hideError() {
@@ -246,6 +444,10 @@
       div.innerText = text || "";
       return div.innerHTML;
     }
+
+    document.getElementById("back-to-list").addEventListener("click", backToList);
+    document.getElementById("result-back").addEventListener("click", backToList);
+    document.getElementById("review-back").addEventListener("click", backToList);
 
     window.addEventListener("DOMContentLoaded", init);
   </script>
